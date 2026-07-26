@@ -1,44 +1,44 @@
-"""
-linenet_train.py — PEZZO 2/3: entrypoint di training per LineNet.
-================================================================================
-FILOSOFIA
----------
-Il loop di training che gira e' ESATTAMENTE tk.train() di train_knister_v2.py:
-byte-identico, importato, mai copiato. Protocollo (acting, replay, n-step,
-selezione BEST, eval periodiche e finali, salvataggi) identico a v2 per
-costruzione. train_knister_v2.py resta intoccato: i run di controllo n=1
-girano sul file originale puro.
+"""Entrypoint di addestramento per LineNet.
 
-Questo file installa 5 innesti chirurgici sul modulo importato:
-  1. tk.encode_states          -> aggiunge il ramo state_encoding == "line";
-                                  per tutti gli altri encoding delega
-                                  all'originale (passthrough di *args/**kwargs)
-  2. tk.state_input_size       -> "line" -> 34; altrimenti delega
-  3. tk.validate_state_encoder -> per "line": no-op dichiarato (la copertura
-                                  e' dei 4 validatori LineNet eseguiti
-                                  all'avvio); altrimenti delega
-  4. tk.DQN                    -> factory: in modalita' LineNet restituisce
-                                  LineNet (ignora input_size/hidden_size/
-                                  network_type), altrimenti delega alla DQN
-                                  originale. Copre tutti e tre i punti di
-                                  costruzione dentro train(): policy, target,
-                                  ricarica del BEST per la valutazione finale.
-  5. tk.save_model             -> nei metadati riscrive network_type="linenet".
-                                  (Internamente cfg.network_type="dueling"
-                                  serve solo a superare la validazione di
-                                  train(); la rete reale e' LineNet.)
+Il ciclo di training eseguito è quello di train_knister_v2.py: viene importato
+e richiamato, mai duplicato. Protocollo di acting, replay, ritorni a n passi,
+selezione del checkpoint migliore, valutazioni periodiche e finali e
+salvataggi restano quindi identici a quelli del motore per costruzione, e
+train_knister_v2.py non viene modificato: le configurazioni che usano
+l'architettura originale continuano a girare sul file intatto.
+
+Questo modulo si limita a installare cinque innesti sul modulo importato:
+
+  1. tk.encode_states          aggiunge il ramo state_encoding == "line"; per
+                               ogni altro encoding delega all'originale
+  2. tk.state_input_size       "line" -> 34; altrimenti delega
+  3. tk.validate_state_encoder per "line" è un no-op, poiché la copertura è
+                               affidata ai quattro validatori di LineNet
+                               eseguiti all'avvio; altrimenti delega
+  4. tk.DQN                    factory che restituisce una LineNet quando la
+                               modalità è attiva (ignorando input_size,
+                               hidden_size e network_type), altrimenti delega
+                               alla DQN originale. Copre i tre punti in cui
+                               train() costruisce una rete: policy, target e
+                               ricarica del checkpoint migliore per la
+                               valutazione finale
+  5. tk.save_model             scrive network_type="linenet" nei metadati
 
 NOTE OPERATIVE
 --------------
-- dueling_mask_aware non ha effetto su LineNet (maschera interna sempre attiva).
-- NON usare --compile con LineNet (scatter/index_add non testati sotto compile).
-- --network-type e --state-encoding NON vanno passati: gestiti internamente
-  (il comando fallisce con errore chiaro se presenti).
-- Nel dump di config stampato da train() comparira' network_type='dueling':
-  e' cosmetico (vedi innesto 5); il banner [linenet] e il conteggio parametri
-  indicano la rete effettiva.
-- --help / -h mostra l'help di train_knister_v2; i flag propri di questo file
-  sono: --line-embed-dim, --line-ctx-dim, --line-head-dim,
+- dueling_mask_aware non ha effetto su LineNet: la maschera interna è sempre
+  attiva.
+- --compile non è supportato con LineNet: le operazioni scatter e index_add
+  non sono state verificate sotto compilazione.
+- --network-type e --state-encoding non vanno passati, poiché gestiti
+  internamente; il comando fallisce con un errore esplicito se presenti.
+- Nel dump di configurazione stampato da train() compare
+  network_type='dueling': è un valore di comodo necessario a superare la
+  validazione del motore, che accetta solo "mlp" o "dueling". La rete
+  effettivamente in uso è indicata dal banner [linenet] e dal conteggio dei
+  parametri, e il metadato salvato nel checkpoint riporta "linenet".
+- --help mostra l'help di train_knister_v2; i flag propri di questo modulo
+  sono --line-embed-dim, --line-ctx-dim, --line-head-dim e
   --skip-startup-validators.
 
 USO
@@ -47,14 +47,12 @@ USO
       [--line-embed-dim 64 --line-ctx-dim 128 --line-head-dim 256] \
       [qualunque altro flag di train_knister_v2.py]
 
-Percorsi di salvataggio se non passati esplicitamente:
+Percorsi di salvataggio predefiniti, se non passati esplicitamente:
   --save-path modello_linenet_last.pth
   --best-save-path modello_linenet_best.pth
 
-All'avvio: 4 validatori LineNet (con il contratto verificato
-step() = (next_state, reward, done), linenet.py v1.1) + conteggio parametri,
-poi tk.train(cfg).
-================================================================================
+All'avvio vengono eseguiti i quattro validatori di LineNet e stampato il
+conteggio dei parametri, poi viene invocato tk.train(cfg).
 """
 
 from __future__ import annotations
@@ -79,8 +77,8 @@ _ORIG: dict = {}
 def activate_linenet(embed_dim=64, ctx_dim=128, head_dim=256):
     """Attiva la modalita' LineNet per la factory di rete.
 
-    Esposta a livello di modulo perche' verra' riusata dal pezzo 3
-    (eval_tools) per ricostruire checkpoint LineNet.
+    Esposta a livello di modulo perche' riusata anche da eval_tools.py per
+    ricostruire i checkpoint LineNet.
     """
     _MODE["active"] = True
     _MODE["dims"] = (int(embed_dim), int(ctx_dim), int(head_dim))

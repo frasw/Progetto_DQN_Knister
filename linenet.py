@@ -1,64 +1,68 @@
-"""
-linenet.py — LineNet: rete dueling a "scorer di linea condiviso" per Knister.
-================================================================================
-PEZZO 1/3 (classe + ramo encoder + validatori) — v1.1
-  v1.1 (16/07): corretto _step_env al contratto verificato sul sorgente,
-  FastVectorKnister.step(actions) -> (next_state, reward, done): il reward e'
-  out[1], non out[0]; aggiunta guardia di shape. Nessun'altra modifica rispetto
-  alla v1.0 (equivale al fix gia' applicato localmente, piu' la guardia).
+"""LineNet: rete dueling con scorer di linea condiviso per Knister.
 
-NON modifica train_knister_v2.py:
-si limita a importarlo per riusarne le primitive verificate (score_lines_torch,
-FastVectorKnister, DEFAULT_SCORE_TABLE, ...). L'integrazione nel training
-(dispatch di encode_states, entrypoint CLI) arriva nel pezzo 2, dopo l'esito
-dei validatori.
+Questo modulo definisce l'architettura LineNet, il ramo di encoding dello stato
+che la alimenta e i validatori di correttezza. Non modifica
+train_knister_v2.py: lo importa per riusarne le primitive (score_lines_torch,
+FastVectorKnister, DEFAULT_SCORE_TABLE), così la logica di punteggio resta
+un'unica fonte di verità condivisa tra rete e ambiente.
 
-USO (accanto a train_knister_v2.py e api.py):
-    python linenet.py                # validatori su CPU (sufficiente)
-    python linenet.py --device cuda  # opzionale, ripete i check su GPU
+USO
+---
+    python linenet.py                # esegue i validatori su CPU
+    python linenet.py --device cuda  # ripete i controlli su GPU
+
+MOTIVAZIONE
+-----------
+Un MLP su un vettore piatto di feature tratta le 25 uscite come indipendenti e
+deve riapprendere da zero, per ogni zona della griglia, la stessa regola di
+punteggio. Il punteggio di Knister si fattorizza invece come somma su 12 linee
+(5 righe, 5 colonne, 2 diagonali) della medesima funzione di combinazione, con
+un peso maggiore sulle diagonali. LineNet incorpora questa struttura: una sola
+rete "scorer" viene applicata con gli stessi pesi a tutte le linee, e ciò che
+viene appreso su una riga vale automaticamente per ogni colonna e diagonale.
 
 CONTRATTO
 ---------
 - Stato "line": tensore float32 [N, 34] = [griglia(25), lancio(1), tabella(8)],
-  prodotto da encode_line_states(states_u8, device, score_table).
-  Valori NON normalizzati: la rete ricostruisce gli interi internamente.
-- LineNet.forward(x, valid_mask=None) -> Q [N, 25].
-  * valid_mask è accettata per compatibilità di interfaccia con DQN ma IGNORATA:
-    la maschera di validità è derivata internamente da (griglia == 0), che è
-    identica a quella calcolata dai chiamanti. La media dueling è SEMPRE
-    mascherata (equivalente a dueling_mask_aware=True).
+  prodotto da encode_line_states(states_u8, device, score_table). I valori non
+  sono normalizzati: la rete ricostruisce gli interi internamente.
+- LineNet.forward(x, valid_mask=None) -> Q [N, 25]. valid_mask è accettata per
+  compatibilità di interfaccia con DQN ma ignorata: la maschera di validità
+  viene derivata internamente da (griglia == 0), che coincide con quella
+  calcolata dai chiamanti. La media dueling è sempre mascherata sulle sole
+  azioni valide.
 - LineNet.immediate_rewards(x) -> [N, 25]: reward immediato esatto per ogni
   azione valida (0 sulle celle occupate). Per costruzione coincide con il
-  reward dell'ambiente: è la base del validatore di decomposizione e verrà
-  riusato dal lookahead in eval_tools (pezzo 3).
+  reward dell'ambiente.
 
-ARCHITETTURA (default: embed=64, ctx=128, head=256 → 110.786 parametri)
------------------------------------------------------------------------
-Per ciascuna delle 12 linee (5 righe, 5 colonne, 2 diagonali):
+ARCHITETTURA (default: embed=64, ctx=128, head=256 -> 110.786 parametri)
+------------------------------------------------------------------------
+Per ciascuna delle 12 linee:
     e_l = phi(istogramma valori/5, n_riempiti/5, flag_diag, peso/2,
-              punteggio_linea_pesato/C, tabella/C)          [phi CONDIVISA]
+              punteggio_linea_pesato/C, tabella/C)          [phi condivisa]
 Per ciascuna delle 60 incidenze (cella, linea, slot):
-    what-if: la linea con il lancio corrente inserito nello slot ->
-    e'_l e Δs = punteggio_pesato(dopo) − punteggio_pesato(prima)
-Per azione c:  a_c = [Σ_{l∋c}(e'−e), Σ_{l∋c}e', Δr_c/C_imm, |l∋c|/4]
-Contesto:      ctx = ReLU(W·[mean_l(e) ⊕ max_l(e) ⊕ globali ⊕ tabella/C])
+    what-if con il lancio corrente inserito nello slot, da cui
+    e'_l e Delta_s = punteggio_pesato(dopo) - punteggio_pesato(prima)
+Per azione c:  a_c = [somma(e'-e), somma(e'), Delta_r_c/C_imm, n_linee(c)/4]
+Contesto:      ctx = ReLU(W . [media(e), max(e), globali, tabella/C])
 Teste dueling: V = MLP(ctx);  A_c = psi([a_c, ctx]) condivisa sulle 25 celle;
-               Q = V + A − media_mascherata(A)
-Invarianze: nessuna identità di riga/colonna/posizione nelle feature (solo
-flag diagonale + peso) → Q è ESATTAMENTE equivariante sotto le 8 simmetrie D4,
-per costruzione nei pesi. C = massimo della tabella al momento della
-costruzione, salvato come buffer nel checkpoint (pin della normalizzazione).
+               Q = V + A - media_mascherata(A)
 
-VALIDATORI (da eseguire nell'ambiente reale, esito da riportare)
-----------------------------------------------------------------
-  1. encoding "line": shape/dtype/passthrough esatto, tabella default e per-sample
-  2. decomposizione del reward: immediate_rewards == reward di FastVectorKnister
-     su rollout completi, tabella default E tabelle campionate
-  3. equivarianza D4 esatta delle Q (permutazioni costruite localmente,
-     indipendenti dal codice di augmentation di v2)
-  4. forma/finitezza (stato iniziale, intermedio, terminale con lancio=0)
-     + un passo di backward con gradienti finiti
-================================================================================
+Le feature non contengono alcuna identità di riga, colonna o posizione (solo
+il flag diagonale e il peso): di conseguenza Q è esattamente equivariante
+rispetto alle 8 simmetrie del gruppo diedrale D4, per costruzione nei pesi e
+non per addestramento. La costante C di normalizzazione è il massimo della
+tabella al momento della costruzione, salvata come buffer nel checkpoint.
+
+VALIDATORI
+----------
+  1. encoding "line": shape, dtype, passthrough, tabella default e per-sample
+  2. decomposizione del reward: immediate_rewards coincide con il reward di
+     FastVectorKnister su rollout completi, con tabella default e campionate
+  3. equivarianza D4 esatta delle Q, con permutazioni costruite localmente e
+     indipendenti dal codice di augmentation del motore
+  4. forma e finitezza (stato iniziale, intermedio, terminale con lancio=0)
+     più un passo di backward con gradienti finiti
 """
 
 from __future__ import annotations
@@ -215,7 +219,7 @@ def encode_line_states(states_u8, device, score_table=None):
 
 
 def line_state_input_size():
-    """Da usare nel pezzo 2 dentro state_input_size(): la 'line' e' 34."""
+    """Dimensione del vettore di stato per l'encoding 'line': 34."""
     return LINE_STATE_SIZE
 
 
@@ -337,7 +341,7 @@ class LineNet(nn.Module):
         )                                                               # [N, 60, E]
         delta_e = e_hyp - e_base[:, self.inc_line]                      # [N, 60, E]
 
-        # ---- igiene: azzera i contributi delle incidenze su celle occupate ----
+        # ---- pulizia: azzera i contributi delle incidenze su celle occupate ----
         inc_valid = valid[:, self.inc_cell]                             # [N, 60]
         vmask = inc_valid.to(x.dtype).unsqueeze(-1)
         delta_e = delta_e * vmask
@@ -431,10 +435,12 @@ def _make_env(n_envs, rng, score_table=None):
 
 
 def _step_env(env, actions):
-    """Contratto verificato sul sorgente (v1.1):
-    FastVectorKnister.step(actions) -> (next_state, reward, done).
-    Il reward per-env e' quindi out[1]. Guardia di shape: se il contratto
-    cambiasse, fallire rumorosamente invece di confrontare l'array sbagliato.
+    """Estrae i reward per-ambiente da un passo di FastVectorKnister.
+
+    Il contratto di step(actions) è (next_state, reward, done): il reward è
+    quindi il secondo elemento. La guardia sulla shape fa fallire in modo
+    esplicito se il contratto cambiasse, invece di confrontare silenziosamente
+    l'array sbagliato.
     """
     out = env.step(actions)
     rewards = out[1] if isinstance(out, (tuple, list)) else out

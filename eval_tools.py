@@ -1,45 +1,48 @@
-"""
-eval_tools.py — PEZZO 3/3: strumenti di valutazione per checkpoint Knister.
-================================================================================
-Task (sottocomandi):
+"""Strumenti di valutazione per i checkpoint Knister.
 
-  info       carica un checkpoint, ricostruisce la rete, stampa metadati e
-             una sanity greedy veloce (256 partite)
-  lookahead  expectimax a 1 passo in valutazione: per ogni mossa
-             argmax_a [ r(s,a) + Σ_v p(v) · max_a' Q(s',v,a') ] con la
-             distribuzione ESATTA dei dadi (25×11 successori, forward batchato).
-             Riporta greedy e lookahead sugli stessi semi (dadi appaiati) +
-             percentuale di accordo tra le due politiche.
-  zeroshot   stress test di generalizzazione: valuta greedy sotto la tabella
-             default + N tabelle campionate, con feature "aware" (encoder
-             alimentato con la NUOVA tabella) e "frozen" (encoder con la
-             default mentre l'ambiente usa la nuova). Per checkpoint
-             engineered192 aggiunge la modalita' "split" (proiezioni aware,
-             blocco di condizionamento a 8 dim congelato alla default).
-  official   verifica sul KnisterGame ufficiale via tk.evaluate_official,
-             con adattamento per introspezione della firma (vedi nota sotto).
+Sottocomandi disponibili:
+
+  info       carica un checkpoint, ricostruisce la rete, stampa i metadati e
+             una valutazione greedy rapida di controllo (256 partite)
+  lookahead  expectimax a un passo in valutazione: per ogni mossa sceglie
+             argmax_a [ r(s,a) + somma_v p(v) * max_a' Q(s',v,a') ] usando la
+             distribuzione esatta dei dadi (25x11 successori, forward
+             batchato). Riporta greedy e lookahead sugli stessi semi, con
+             dadi appaiati, e la percentuale di accordo tra le due politiche
+  zeroshot   test di generalizzazione: valuta la politica greedy sotto la
+             tabella dei punteggi di default e sotto N tabelle campionate, in
+             modalità "aware" (encoder alimentato con la nuova tabella) e
+             "frozen" (encoder con la tabella default mentre l'ambiente usa
+             quella nuova). Per i checkpoint engineered192 aggiunge la
+             modalità "split", con proiezioni aware e blocco di
+             condizionamento congelato sulla default
+  official   verifica sul KnisterGame ufficiale tramite tk.evaluate_official
 
 RICOSTRUZIONE DEL CHECKPOINT
 ----------------------------
-1) si tenta la lettura dei metadati (dict/config nel payload o sidecar .json);
-2) l'architettura viene comunque INFERITA dalle shape dello state_dict
-   (fonte di verita': i pesi), con cross-check sui metadati:
-   - chiavi phi.*/ctx_lin.* -> LineNet; dims: E=phi.0.weight[0],
-     C=ctx_lin.weight[0], H=adv_head.0.weight[0]
-   - altrimenti DQN v2: input_size/hidden_size dal primo peso 2-D;
-     network_type dai metadati (default "dueling"); state_encoding dai
-     metadati o dalla mappa input_size {184,192,259,267,312,26}.
+1) si tenta la lettura dei metadati (dizionario nel payload oppure sidecar
+   .json affiancato al file dei pesi);
+2) l'architettura viene comunque inferita dalle shape dello state_dict, che
+   sono la fonte di verità, con verifica incrociata sui metadati:
+   - chiavi phi.* e ctx_lin.* indicano una LineNet; le dimensioni si leggono
+     da phi.0.weight[0], ctx_lin.weight[0] e adv_head.0.weight[0]
+   - altrimenti si tratta di una DQN del motore: input_size e hidden_size dal
+     primo peso bidimensionale, network_type dai metadati (default "dueling"),
+     state_encoding dai metadati o dedotto dalla mappa delle dimensioni di
+     input {184, 192, 259, 267, 312, 26}
 
-NOTA DI TRASPARENZA (task `official`)
--------------------------------------
-tk.evaluate_official e' l'unica funzione di v2 la cui firma non e' coperta dai
-contratti gia' validati nei pezzi 1-2. Il task la invoca mappando i parametri
-per introspezione (inspect.signature) da un dizionario di candidati; se la
-mappatura non basta, stampa firma e docstring da riportare, senza toccare
-nient'altro. Tutti gli altri task usano SOLO contratti gia' verificati:
-step() = (next_state, reward, done), observe(), random_valid_actions,
-score_lines_torch (via LineNet.immediate_rewards, validatore 2),
-encode_line_states, encode_states (smoke del pezzo 2).
+Questo rende il caricamento robusto anche quando i metadati sono incompleti o
+assenti.
+
+INVOCAZIONE DI evaluate_official
+--------------------------------
+Il sottocomando official adatta i parametri alla firma di tk.evaluate_official
+per introspezione (inspect.signature), a partire da un dizionario di nomi
+candidati. Se l'adattamento non riesce, il comando stampa firma e docstring
+della funzione senza modificare nient'altro. Tutti gli altri sottocomandi
+usano contratti già coperti dai validatori: step() = (next_state, reward,
+done), observe(), random_valid_actions, score_lines_torch (tramite
+LineNet.immediate_rewards), encode_line_states ed encode_states.
 
 USO
 ---
@@ -51,9 +54,9 @@ USO
                                  [--batch-games 512] [--device auto]
   python eval_tools.py official  --checkpoint CKPT [--games 500] [--seed 13579]
 
-Il seme di valutazione di default (13579) e' DIVERSO dai semi di protocollo
-9876/24681357 per non contaminare selezione BEST e hold-out.
-================================================================================
+Il seme di valutazione di default (13579) è diverso dai semi di protocollo
+9876 e 24681357, per non contaminare la selezione del checkpoint migliore né
+la valutazione hold-out.
 """
 
 from __future__ import annotations
@@ -474,8 +477,8 @@ def task_zeroshot(args, agent):
 def task_official(args, agent):
     fn = getattr(tk, "evaluate_official", None)
     if fn is None:
-        print("[eval_tools] tk.evaluate_official non trovato: mandami "
-              "l'elenco delle funzioni di valutazione del tuo v2.")
+        print("[eval_tools] tk.evaluate_official non trovato nel modulo "
+              "train_knister_v2: verificare la versione del file.")
         return
     # cfg minimale coi default del parser originale, coerente col checkpoint
     old_argv = sys.argv
@@ -515,7 +518,8 @@ def task_official(args, agent):
             print(f"doc: {inspect.getdoc(fn)}")
         except Exception:
             pass
-        print("Mandami firma/doc qui sopra: adatto la chiamata in una riga.")
+        print("La firma stampata sopra indica i parametri attesi dalla "
+              "funzione.")
 
 
 # ----------------------------------------------------------------------------

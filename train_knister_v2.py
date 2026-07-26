@@ -1,113 +1,106 @@
-"""Knister Double-DQN — v2, a partire dall'audit del 11/07/2026.
+"""Knister Double-DQN: ambiente vettorizzato, training e valutazione.
 
-Modifiche rispetto a train_knister_engineered184_dueling.py, in ordine di
-priorità (vedi audit_tecnico_dqn_knister.md per l'analisi completa):
+Questo modulo contiene il motore completo del progetto: la reimplementazione
+vettorizzata del gioco, gli encoder di stato, la rete DQN, il replay buffer,
+il ciclo di addestramento e le procedure di valutazione.
 
-1. CONFORMITÀ (critical). I punteggi delle combo non sono più letterali
-   duplicati in FastVectorKnister e nell'encoder: sono letti una sola volta
-   da api.KnisterGame (DEFAULT_SCORE_TABLE) e passati sempre come parametro
-   esplicito. Config.randomize_scores (default False) attiva una tabella
-   diversa ad ogni round vettoriale durante il training, con l'encoder
-   "engineered192" (nuovo default) che la include come feature — così la
-   policy impara a condizionarsi sui punteggi correnti invece di assumerli
-   fissi. La VALUTAZIONE usa sempre la tabella vera, indipendentemente da
-   randomize_scores: il punteggio riportato resta confrontabile con le run
-   precedenti e con ciò che vedrà il docente.
+CONFORMITA' ALLE REGOLE DEL GIOCO
+---------------------------------
+I punteggi delle combinazioni non sono costanti cablate nel codice: la tabella
+di default viene letta una sola volta dalle costanti pubbliche di
+api.KnisterGame (DEFAULT_SCORE_TABLE) e da lì passata come parametro esplicito
+a ogni funzione che ne ha bisogno (FastVectorKnister._score_lines,
+score_lines_torch e gli encoder). Una modifica dei punteggi si propaga quindi
+in modo coerente, senza copie che restano disallineate.
 
-2. DUELING MASK-AWARE (high). DQN.forward ora accetta una valid_mask
-   opzionale: se fornita, la media delle advantage nell'aggregazione dueling
-   è calcolata solo sulle azioni valide, invece che su tutte e 25 (prima,
-   le celle occupate ricevevano comunque un contributo di gradiente tramite
-   il termine di media). Config.dueling_mask_aware (default True); impostare
-   a False per l'A/B diretto contro il comportamento precedente.
+L'equivalenza tra l'ambiente vettorizzato e api.KnisterGame è verificata da
+validate_fast_environment(), eseguita all'avvio di ogni addestramento: le
+stesse partite vengono giocate con entrambe le implementazioni e se ne
+confrontano reward, griglie e punteggi finali.
 
-3. N-STEP RETURN. Config.n_step (default 1 = comportamento originale,
-   transizioni a singolo step). Con gamma=1 il ritorno a n-step è la somma
-   dei reward reali nella finestra (nessun peso esponenziale necessario),
-   con la finestra troncata correttamente vicino al termine dell'episodio
-   (orizzonte sempre fisso a 25 passi). Richiede di bufferizzare l'intera
-   traiettoria di un round prima di poter spingere le transizioni nel
-   replay: l'apprendimento, di conseguenza, ora avviene con
-   25*updates_per_vector_step aggiornamenti gradiente eseguiti dopo ogni
-   round completo, invece che intrecciato passo per passo. A parità di
-   episodi il numero totale di aggiornamenti gradiente è lo stesso; può
-   differire di al più un round (trascurabile, vedi nota sui test) per come
-   viene rilevato l'attraversamento di learning_starts.
+ARCHITETTURA DELLA RETE
+-----------------------
+DQN supporta due varianti, selezionabili con Config.network_type: un MLP
+semplice e una versione dueling (V(s) + A(s,a) - media(A)). Nella variante
+dueling la media delle advantage è calcolata sulle sole azioni valide, non su
+tutte e 25: le celle già occupate non sono scelte legali e non devono ricevere
+contributo di gradiente attraverso il termine di media. Il comportamento è
+controllato da Config.dueling_mask_aware (default True); impostarlo a False
+riproduce la media non mascherata, utile solo per confronti diretti.
 
-Cosa NON è cambiato: MDP, reward, gamma, Double DQN, target update,
-formato del replay buffer (più leggero: array NumPy compatti, non tensori),
-ambiente vettorizzato (stessa logica, ora parametrizzata sui punteggi),
-protocollo di valutazione (vectorized/official, checkpoint BEST/LAST,
-hold-out finale).
+OPZIONI DI ADDESTRAMENTO
+------------------------
+Il modulo espone diverse varianti algoritmiche, tutte disattivate di default e
+combinabili liberamente. Questo consente di riprodurre dallo stesso file sia la
+configurazione finale sia gli esperimenti di confronto.
 
-Retrocompatibilità: state_encoding="engineered184" (senza condizionamento
-sullo score) con randomize_scores=False riproduce esattamente, cifra per
-cifra, le feature del vecchio encode_engineered184 (verificato).
+1. RITORNI A N PASSI (Config.n_step, default 1). Con gamma=1 il ritorno a n
+   passi è la somma dei reward reali nella finestra, senza pesi esponenziali,
+   troncata correttamente in prossimità della fine dell'episodio (l'orizzonte
+   è sempre fisso a 25 passi). Richiede di bufferizzare l'intera traiettoria
+   di un round prima di inserire le transizioni nel replay: gli aggiornamenti
+   di gradiente avvengono quindi in blocco dopo ogni round completo
+   (25 * updates_per_vector_step) invece che intrecciati passo per passo. A
+   parità di episodi il numero totale di aggiornamenti resta lo stesso.
 
-NON incluso in questa versione (vedi audit, roadmap §F/§G): il redesign
-architetturale "scorer condiviso per cella". È il passo successivo
-raccomandato, solo dopo aver isolato l'effetto dei punti 1-3 qui sopra.
+2. TABELLA PUNTEGGI VARIABILE (Config.randomize_scores, default False).
+   Campiona una tabella diversa a ogni round vettoriale durante il training.
+   Va usata con l'encoder "engineered192", che include la tabella corrente tra
+   le feature: la policy impara così a condizionarsi sui punteggi invece di
+   assumerli fissi. La valutazione usa sempre la tabella reale, indipendentemente
+   da questa opzione, così il punteggio riportato resta confrontabile.
 
---- Seconda serie di modifiche (11/07/2026): ---
+3. SCORE CORRENTE PER LINEA (Config.include_current_line_scores, default
+   False). Aggiunge 75 feature allineate alle azioni con il punteggio corrente
+   (non proiettato) di riga, colonna e diagonale di ciascuna azione, riusando
+   un calcolo già presente nell'encoder per derivare il reward immediato.
+   Componibile con gli altri encoder: 184+75=259 dimensioni con
+   "engineered184", 192+75=267 con "engineered192".
 
-4. SCORE CORRENTE PER RIGA/COLONNA/DIAGONALE. Config.include_current_line_scores
-   (default False) aggiunge 75 feature action-aligned con lo score CORRENTE
-   (non proiettato) della riga/colonna/diagonale di ciascuna azione — es.
-   "riga 2 ha un tris" — riusando un calcolo già presente nell'encoder per
-   derivare il reward immediato, prima scartato. Composabile con
-   condition_on_score: con state_encoding="engineered192" diventano 192+75=267
-   dimensioni, con "engineered184" 184+75=259.
+4. PRIORITIZED EXPERIENCE REPLAY (Config.prioritized_replay, default False).
+   Campionamento proporzionale a (|TD-error| + per_epsilon) ** per_alpha, con
+   correzione di importance sampling nella loss e beta annealed linearmente da
+   per_beta_start a per_beta_end. Si appoggia a SumTree, un albero delle
+   priorità che rende campionamento e aggiornamento O(log n) invece di O(n).
+   Con l'opzione disattivata il campionamento è uniforme; ReplayBuffer.sample
+   restituisce comunque indici e pesi (sempre 1.0), così train_one_batch ha un
+   unico percorso di codice.
 
-5. PRIORITIZED EXPERIENCE REPLAY. Config.prioritized_replay (default False).
-   Nuove classi SumTree (albero delle priorità, O(log n) invece di O(n) per
-   sample/update) e PrioritizedReplayBuffer (sottoclasse di ReplayBuffer,
-   stessa interfaccia). Priorità = (|TD-error| + per_epsilon) ** per_alpha,
-   con beta (correzione di importance sampling nella loss) annealed
-   linearmente da per_beta_start a per_beta_end sulla frazione di
-   aggiornamenti gradiente stimati (per_beta_by_updates). Con
-   prioritized_replay=False il campionamento resta uniforme, identico a
-   prima (ReplayBuffer.sample ora ritorna anche indici e pesi IS, sempre
-   1.0 in quel caso — stessa interfaccia per non duplicare train_one_batch).
+5. SIMMETRIE D4 COME DATA AUGMENTATION (Config.symmetry_augmentation, default
+   False). A ogni minibatch campionato dal replay applica una delle 8
+   trasformazioni del gruppo diedrale (identità, 3 rotazioni, 4 riflessioni) a
+   stato, stato successivo e azione, scelta indipendentemente per ciascun
+   campione. I reward non vanno trasformati: il punteggio Knister dipende solo
+   dal multiset di valori di ogni linea, non da quale riga o colonna fisica
+   sia. L'invarianza è verificata da validate_symmetry_augmentation(),
+   eseguita all'avvio quando l'opzione è attiva. L'augmentation avviene al
+   momento del campionamento e non aumenta la memoria del replay buffer.
 
-6. SIMMETRIE D4 COME DATA AUGMENTATION. Config.symmetry_augmentation (default
-   False). Ad ogni minibatch campionato dal replay, applica una delle 8
-   trasformazioni del gruppo diedrale (identità, 3 rotazioni, 4 riflessioni)
-   a stato/prossimo-stato/azione, scelta indipendentemente per ciascun
-   campione. Non serve toccare i reward: lo score Knister dipende solo dal
-   multiset di valori per riga/colonna/diagonale, non da quale riga/colonna
-   fisica sia — invarianza verificata empiricamente in
-   validate_symmetry_augmentation() (chiamata all'avvio se l'opzione è
-   attiva). Applicata al momento del sampling, non alla raccolta: non
-   aumenta la memoria del replay buffer.
+6. LEARNING RATE DECRESCENTE (Config.lr_end, default None = costante). Se
+   impostato, il learning rate resta fisso fino alla frazione
+   lr_decay_start_fraction degli aggiornamenti stimati, poi decresce
+   linearmente fino a lr_end alla frazione lr_decay_fraction, restando poi
+   costante. Il valore corrente compare nel log di progresso solo quando il
+   decadimento è attivo. Nota sperimentale: un decadimento avviato fin
+   dall'inizio del training si è rivelato dannoso, perché riduce il passo
+   proprio nella fase di crescita più rapida; lr_decay_start_fraction esiste
+   per limitare il decadimento al tratto finale.
 
-Tutti e tre di default OFF: si combinano liberamente fra loro e con le
-modifiche del punto 1-3 per ablation isolate, oppure tutte insieme (testato).
+ENCODER DI STATO
+----------------
+state_encoding seleziona la rappresentazione passata alla rete: "raw" (26
+dimensioni), "onehot" (312), "engineered184" e "engineered192". Le varianti
+engineered comprendono valori normalizzati delle celle, maschera di validità,
+reward immediato e proiezioni di linea per ciascuna azione, lancio corrente in
+one-hot, progresso della partita e istogrammi dei valori presenti e attesi.
+La variante 192 aggiunge la tabella dei punteggi corrente.
 
---- Terza modifica (12/07/2026): learning rate decrescente ---
-
-7. LEARNING RATE DECRESCENTE. Config.lr_end (default None = lr costante,
-   comportamento identico a prima), Config.lr_decay_start_fraction (default
-   0.0) e Config.lr_decay_fraction (default 1.0). Se lr_end è impostato, il
-   learning rate resta fisso a lr fino a lr_decay_start_fraction degli
-   aggiornamenti gradiente totali stimati, poi decresce linearmente fino a
-   lr_end alla frazione lr_decay_fraction, poi resta costante a lr_end.
-
-   PRIMO TENTATIVO (lr_decay_start_fraction implicitamente 0.0, decadimento
-   da subito) TESTATO E FALLITO: su n_step=3 a 4M episodi, hold-out
-   54,47 contro 58,90 dello stesso run senza decadimento — un peggioramento
-   di 4,4 punti, non rumore (z≈33). Causa individuata confrontando le due
-   traiettorie checkpoint per checkpoint: il decadimento lineare da subito
-   aveva già ridotto il lr a meno della metà proprio nella finestra
-   (episodi 1,8M-2,4M) in cui il run senza decadimento otteneva il suo
-   guadagno più grande (+7 punti). lr_decay_start_fraction è stato aggiunto
-   di conseguenza, per permettere di mantenere il lr pieno durante la fase
-   di crescita e limitare il decadimento a un vero "affinamento" solo nel
-   tratto finale (es. lr_decay_start_fraction=0.8). Non ancora verificato se
-   questa versione corretta migliori il risultato — resta un'ipotesi, non
-   una conclusione.
-
-   Il lr corrente compare nel log di progresso solo quando lr_end è
-   impostato (altrimenti l'output resta identico a prima).
+VALUTAZIONE
+-----------
+Due modalità: "vectorized" usa FastVectorKnister ed è quella impiegata per le
+valutazioni periodiche durante il training; "official" gioca direttamente con
+api.KnisterGame ed è più lenta, pensata per la verifica finale di un
+checkpoint. Entrambe usano una politica greedy pura, senza esplorazione.
 """
 
 from __future__ import annotations
@@ -136,8 +129,8 @@ N_CELLS = 25
 GRID_SIZE = 5
 
 # -----------------------------------------------------------------------------
-# Simmetrie D4 della griglia 5x5, per data augmentation nel replay 
-# (vedi audit §9.3/§G). Il punteggio Knister dipende solo dal
+# Simmetrie D4 della griglia 5x5, per data augmentation nel replay.
+# Il punteggio Knister dipende solo dal
 # multiset di valori presente in ciascuna riga/colonna/diagonale, non da quale
 # riga/colonna fisica sia: applicare una delle 8 trasformazioni del gruppo
 # diedrale a griglia+azione produce quindi una transizione ALTRETTANTO VALIDA
@@ -198,8 +191,7 @@ DICE_SUM_PROBABILITIES = np.array(
 #
 # In precedenza i punteggi (10, 6, 8, 3, 3, 1, 8, 12) erano duplicati come
 # letterali sia in FastVectorKnister._score_lines sia in score_lines_torch,
-# senza alcun collegamento a api.py. Se il docente modifica i punteggi in sede
-# orale, quelle due copie non si aggiornano da sole. Qui la tabella di default
+# senza alcun collegamento a api.py. Qui la tabella di default
 # viene letta una sola volta dalle costanti pubbliche di KnisterGame, e da quel
 # momento è sempre un parametro esplicito passato a chi ne ha bisogno, mai un
 # letterale sparso nel codice.
@@ -233,9 +225,8 @@ DEFAULT_SCORE_TABLE = np.array(
 DIAGONAL_MULTIPLIER = float(KnisterGame.DIAGONAL_MULTIPLIER)
 
 # Range di jitter moltiplicativo usato dalla domain randomization (vedi
-# sample_score_table). Sono scelti "alla cieca": non sappiamo come il docente
-# modificherà davvero i punteggi. Vanno rivisti appena si hanno informazioni
-# più precise (vedi audit, sezione I).
+# sample_score_table). I limiti sono prudenziali: coprono variazioni
+# ragionevoli della tabella dei punteggi senza assumerne una specifica.
 SCORE_JITTER_LOW = 0.5
 SCORE_JITTER_HIGH = 2.0
 
@@ -305,7 +296,7 @@ class Config:
     # stimati, poi decresce linearmente fino a `lr_end` alla frazione
     # `lr_decay_fraction`, poi resta costante a lr_end. Con
     # lr_decay_start_fraction=0.0 (default) il decadimento parte subito —
-    # ATTENZIONE, vedi nota nel changelog: su un run lungo questo può tagliare
+    # ATTENZIONE, notare nel changelog: su un run lungo questo può tagliare
     # il lr proprio nella fase di crescita più forte. Per un vero "tapering"
     # finale serve alzare lr_decay_start_fraction (es. 0.8).
     lr_end: Optional[float] = None
@@ -321,21 +312,21 @@ class Config:
     grad_clip: float = 10.0
     target_update_every: int = 4_000  # gradient updates, non passi ambiente
 
-    # --- Conformità: scoring configurabile (vedi audit, §B/§C/§F#2) ---
+    # --- Conformità: scoring configurabile ---
     # Se False: ogni round usa DEFAULT_SCORE_TABLE, comportamento identico
     # alla versione precedente (utile come controllo/ablation).
     randomize_scores: bool = False
     score_jitter_low: float = SCORE_JITTER_LOW
     score_jitter_high: float = SCORE_JITTER_HIGH
 
-    # --- Dueling mask-aware (vedi audit, §C/§F#4) ---
+    # --- Dueling mask-aware ---
     # True: la media delle advantage nella testa dueling è calcolata solo
     # sulle azioni valide. False: riproduce esattamente il comportamento
-    # precedente (media su tutte le 25), utile per l'A/B diretto richiesto
-    # nella roadmap.
+    # precedente (media su tutte le 25), utile solo per confronti diretti
+    # tra le due varianti.
     dueling_mask_aware: bool = True
 
-    # --- N-step return (vedi audit, §C/§F#3) ---
+    # --- N-step return ---
     # 1 = transizioni a singolo step, comportamento identico alla versione
     # precedente. n>1 = ritorno a n-step (esatto per gamma=1, l'orizzonte è
     # sempre 25 e fisso quindi non serve troncare per episodi variabili).
@@ -347,15 +338,15 @@ class Config:
     # encode_engineered per il layout esatto.
     include_current_line_scores: bool = False
 
-    # --- Prioritized Experience Replay (vedi audit §9.5) ---
+    # --- Prioritized Experience Replay ---
     prioritized_replay: bool = False
     per_alpha: float = 0.6          # 0 = uniforme, 1 = priorità piena (Schaul et al.)
     per_beta_start: float = 0.4
     per_beta_end: float = 1.0
     per_epsilon: float = 1e-3       # evita priorità nulla per TD-error=0
 
-    # --- Simmetrie D4 come data augmentation nel replay (suggerimento
-    # vedi audit §9.3/§G). Trasformazione casuale indipendente per
+    # --- Simmetrie D4 come data augmentation nel replay.
+    # Trasformazione casuale indipendente per
     # ciascun campione del minibatch, applicata al momento del sampling: non
     # aumenta la memoria del replay buffer.
     symmetry_augmentation: bool = False
@@ -434,7 +425,7 @@ class DQN(nn.Module):
         """valid_mask: bool tensor [batch, output_size], True = azione disponibile.
 
         Se fornita e network_type=="dueling", la media delle advantage usata
-        per centrare Q è calcolata solo sulle azioni valide (vedi audit §C:
+        per centrare Q è calcolata solo sulle azioni valide:
         senza questa maschera, l'advantage delle celle occupate riceve comunque
         un contributo di gradiente attraverso il termine di media, anche se
         quella cella non è mai selezionabile in quello stato). Per network_type
@@ -460,16 +451,18 @@ class DQN(nn.Module):
 
 
 class FastVectorKnister:
-    """Run many synchronized Knister games in NumPy.
+    """Esegue molte partite di Knister sincronizzate in NumPy.
 
-    The class preserves the official reward semantics: reward is the difference
-    between the total score after and before the placement. Only the affected
-    row, column and (possibly) diagonals are rescored.
+    La classe mantiene la semantica ufficiale delle ricompense: la ricompensa è
+    la differenza tra il punteggio totale dopo e prima del posizionamento.
+    Vengono ricalcolati i punteggi solo per la riga, la colonna e (eventualmente) 
+    le diagonali interessate.
+
     """
 
     SIZE = 5
     N_CELLS = 25
-    N_LINES = 12  # 5 rows + 5 columns + 2 diagonals
+    N_LINES = 12  # 5 righe + 5 colonne + 2 diagonali
 
     def __init__(
         self,
@@ -503,7 +496,7 @@ class FastVectorKnister:
         self.reset()
 
     def _sample_rolls(self) -> np.ndarray:
-        # Sum of two independent fair six-sided dice.
+        # Somma di due dadi a sei facce indipendenti e non truccati.
         return (
             self.rng.integers(1, 7, size=self.n_envs, dtype=np.uint8)
             + self.rng.integers(1, 7, size=self.n_envs, dtype=np.uint8)
@@ -533,11 +526,11 @@ class FastVectorKnister:
         return self.grids == 0
 
     def _score_lines(self, lines: np.ndarray) -> np.ndarray:
-        """Vectorized equivalent of KnisterGame.score_line for shape [N, 5]."""
+        """Equivalente vettorializzato di KnisterGame.score_line per la shape [N, 5]."""
         lines = np.asarray(lines, dtype=np.uint8)
         filled = np.count_nonzero(lines, axis=1)
 
-        # Counts for values 2..12. Values 0 and 1 do not contribute.
+        # Conteggi per i valori 2..12. I valori 0 e 1 non contribuiscono.
         counts = self._one_hot[lines].sum(axis=1)[:, 2:13]
         sorted_counts = np.sort(counts, axis=1)[:, ::-1]
         first = sorted_counts[:, 0]
@@ -552,7 +545,7 @@ class FastVectorKnister:
         scores[(first == 3) & (second != 2)] = st[4]
         scores[(first == 2) & (second != 2)] = st[5]
 
-        # A straight is possible only with five distinct, consecutive values.
+        # Una scala è possibile solo con cinque valori distinti e consecutivi.
         full_unique = (filled == 5) & (first == 1)
         min_value = lines.min(axis=1)
         max_value = lines.max(axis=1)
@@ -568,15 +561,15 @@ class FastVectorKnister:
         forced_next_rolls: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if self.step_index >= self.N_CELLS:
-            raise RuntimeError("All vectorized games have already finished")
+            raise RuntimeError("Tutte le partite vettorializzate sono già terminate")
 
         actions = np.asarray(actions, dtype=np.int64)
         if actions.shape != (self.n_envs,):
-            raise ValueError("actions has wrong shape")
+            raise ValueError("le azioni hanno una shape sbagliata")
         if np.any((actions < 0) | (actions >= self.N_CELLS)):
-            raise ValueError("action outside [0, 24]")
+            raise ValueError("azioni fuori dal range [0, 24]")
         if np.any(self.grids[self._env_ids, actions] != 0):
-            raise ValueError("attempted an invalid/occupied action")
+            raise ValueError("tentativo di eseguire un'azione non valida o su una posizione occupata")
 
         old_totals = self.total_scores.copy()
         self.grids[self._env_ids, actions] = self.rolls
@@ -617,14 +610,14 @@ class FastVectorKnister:
         else:
             forced_next_rolls = np.asarray(forced_next_rolls, dtype=np.uint8)
             if forced_next_rolls.shape != (self.n_envs,):
-                raise ValueError("forced_next_rolls has wrong shape")
+                raise ValueError("forced_next_rolls ha una shape errata")
             self.rolls[:] = forced_next_rolls
 
         return self.observe(), rewards, done
 
 
 # -----------------------------------------------------------------------------
-# Replay buffer stored compactly in CPU RAM
+# Replay buffer memorizzato in modo compatto nella RAM della CPU
 # -----------------------------------------------------------------------------
 
 
@@ -634,7 +627,7 @@ class SumTree:
     campionamento proporzionale alla priorità e aggiornamento delle priorità
     in O(log capacity), invece di O(capacity) per un ricalcolo ingenuo della
     distribuzione cumulativa ad ogni sample. Implementazione standard per
-    Prioritized Experience Replay (Schaul et al., 2015; vedi audit §9.5).
+    Prioritized Experience Replay.
 
     `data_capacity` non deve essere una potenza di 2: internamente si usa la
     prima potenza di 2 >= data_capacity (`tree_capacity`); le foglie in più
@@ -700,8 +693,8 @@ class SumTree:
     ) -> tuple[np.ndarray, np.ndarray]:
         """Campionamento stratificato: divide [0, total) in batch_size
         segmenti uguali e pesca un punto uniforme in ciascuno (riduce la
-        varianza rispetto al campionamento i.i.d. puro, come nel paper
-        originale). Interamente vettorizzato: self.depth iterazioni totali,
+        varianza rispetto al campionamento i.i.d. puro). 
+        Interamente vettorizzato: self.depth iterazioni totali,
         non batch_size * self.depth.
         """
         total = self.total()
@@ -736,8 +729,8 @@ class ReplayBuffer:
         self.dones = np.empty(capacity, dtype=np.bool_)
         # Tabella di scoring in vigore quando la transizione è stata raccolta.
         # Serve perché, con randomize_scores=True, un minibatch campionato dal
-        # replay può mescolare transizioni di round diversi con tabelle diverse
-        # (vedi audit-followup): senza questo campo, train_one_batch userebbe
+        # replay può mescolare transizioni di round diversi con tabelle diverse.
+        # Senza questo campo, train_one_batch userebbe
         # per errore la tabella "corrente" anche per transizioni vecchie.
         # Con randomize_scores=False è sempre DEFAULT_SCORE_TABLE: costo
         # trascurabile (32 byte/transizione) mantenuto per semplicità, invece
@@ -826,12 +819,11 @@ class ReplayBuffer:
 
 
 class PrioritizedReplayBuffer(ReplayBuffer):
-    """Prioritized Experience Replay (Schaul et al., 2015): le transizioni con
+    """Prioritized Experience Replay: le transizioni con
     TD-error assoluto maggiore vengono campionate più spesso, con un peso di
     importance sampling (IS) che corregge il bias introdotto nella loss.
-    Vedi audit §9.5. Stesso layout dati diReplayBuffer 
-    (stati compatti uint8 in RAM); in più un SumTree con le
-    priorità.
+    Stesso layout dati di ReplayBuffer.
+    (stati compatti uint8 in RAM); in più un SumTree con le priorità.
     """
 
     def __init__(
@@ -845,7 +837,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.tree = SumTree(capacity)
         self.alpha = float(alpha)
         self.epsilon = float(epsilon)
-        self.max_priority = 1.0  # priorità assegnata alle transizioni mai ancora valutate
+        self.max_priority = 1.0  # priorità assegnata alle transizioni ancora mai valutate
 
     def add_batch(
         self,
@@ -891,7 +883,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
 
 # -----------------------------------------------------------------------------
-# DQN helpers and state encoding
+# Funzioni di supporto per DQN e codifica dello stato
 # -----------------------------------------------------------------------------
 
 
@@ -995,7 +987,7 @@ def encode_engineered(
         azioni — stessa informazione già calcolata internamente per derivare
         il reward immediato (righe 75:150 sono "dopo l'azione"; questo nuovo
         blocco è "adesso, prima dell'azione"), prima scartata dopo il calcolo
-        del delta. Costo aggiuntivo pressoché nullo: i tensori esistono già.
+        del delta. Costo aggiuntivo pressoché nullo poichè i tensori esistono già.
 
     Layout (184 feature base, invariato rispetto alla versione precedente):
       0:25    valori griglia normalizzati
@@ -1023,7 +1015,7 @@ def encode_engineered(
     cella i senza dover ricostruire da zero righe, colonne e diagonali. Questo è
     un aiuto alla rappresentazione, non un vincolo architetturale: una MLP fully
     connected non garantisce che l'output i "ascolti" davvero soprattutto il
-    blocco i (vedi audit, §C nota su questo commento).
+    blocco i.
     """
     grid = raw[:, :N_CELLS].to(dtype=torch.long)
     roll = raw[:, N_CELLS].to(dtype=torch.long)
@@ -1299,8 +1291,8 @@ def validate_state_encoder(
             ] * ceiling
             if include_current_line_scores:
                 # Score corrente (prima dell'azione) della riga di ciascuna
-                # azione: deve coincidere con lo score ottenuto scorando
-                # direttamente quella riga con la stessa tabella.
+                # azione: deve coincidere con lo score ottenuto calcolando
+                # il punteggio di quella riga direttamente con la stessa tabella.
                 row_ids = torch.from_numpy(actions // GRID_SIZE)
                 grid_3d = torch.from_numpy(states[:, :25].reshape(-1, GRID_SIZE, GRID_SIZE))
                 current_row_all = score_lines_torch(grid_3d, table_t)
@@ -1385,7 +1377,7 @@ def choose_device(requested: str) -> torch.device:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(requested)
     if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but not available")
+        raise RuntimeError("CUDA richiesto ma non disponibile")
     return device
 
 
@@ -1423,22 +1415,22 @@ def lr_by_updates(cfg: Config, gradient_updates: int) -> float:
 
 
 def per_beta_by_updates(cfg: Config, gradient_updates: int) -> float:
-    """Anneala beta (esponente di importance sampling per PER) da
-    per_beta_start a per_beta_end, linearmente sulla frazione di update
+    """Incrementa gradualmente il parametro beta (esponente di importance sampling
+    per PER) da per_beta_start a per_beta_end, linearmente sulla frazione di update
     gradiente completati (stima: 25 * (episodes/n_envs) * updates_per_vector_step,
     assumendo che l'apprendimento sia attivo per la quasi totalità del run —
     approssimazione ragionevole dato che learning_starts è tipicamente una
     piccola frazione di episodes). beta=1 a fine training annulla il bias
-    introdotto dal campionamento non uniforme, come nel paper originale di PER.
+    introdotto dal campionamento non uniforme.
     """
-    total_rounds = max(1, -(-cfg.episodes // cfg.n_envs))  # ceil division
+    total_rounds = max(1, -(-cfg.episodes // cfg.n_envs))  # divisione con arrotondamento per eccesso
     total_updates_estimate = max(1, 25 * total_rounds * cfg.updates_per_vector_step)
     progress = min(1.0, gradient_updates / total_updates_estimate)
     return cfg.per_beta_start + progress * (cfg.per_beta_end - cfg.per_beta_start)
 
 
 def random_valid_actions(valid_mask: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    # Random scores + argmin gives a uniform random free cell for each row.
+    # Punteggi casuali + argmin fornisce una cella libera casuale uniforme per ogni riga.
     random_scores = rng.random(valid_mask.shape)
     random_scores[~valid_mask] = 2.0
     return random_scores.argmin(axis=1).astype(np.int64)
@@ -1461,7 +1453,7 @@ def collect_n_step_transitions(
               esattamente le transizioni a singolo step della versione
               precedente.
 
-    Con gamma=1 (l'unico usato in questo progetto — vedi audit, verifica
+    Con gamma=1 (l'unico usato in questo progetto: verifica
     formale) il ritorno a n-step è la somma semplice dei reward reali nella
     finestra, senza pesi esponenziali. Poiché l'orizzonte è sempre esattamente
     25 e fisso (nessuna terminazione anticipata), la finestra si accorcia in
@@ -1556,7 +1548,7 @@ def train_one_batch(
     ) = replay.sample(batch_size, beta=beta)
 
     if symmetry_augmentation:
-        # Vedi audit §9.3/§G. Una trasformazione D4
+        # Una trasformazione D4
         # casuale e indipendente per ciascun campione del batch (compresa
         # l'identità, 1/8 delle volte): stesso reward per costruzione (score
         # Knister invariante per simmetria della griglia, verificato in
@@ -1591,7 +1583,7 @@ def train_one_batch(
     q_all = policy(states, valid_t if dueling_mask_aware else None)
     q_selected = q_all.gather(1, actions.unsqueeze(1)).squeeze(1)
 
-    # Double DQN: policy selects the next action, target evaluates it.
+    # Double DQN: la policy network seleziona l'azione successiva, la target invece la valuta
     with torch.no_grad():
         next_valid_t = torch.from_numpy(valid).to(device=device)
         next_policy_q = policy(next_states, next_valid_t if dueling_mask_aware else None)
@@ -1607,8 +1599,8 @@ def train_one_batch(
         # quindi il caso standard è invariato.
         targets = rewards + (gamma ** n_step) * next_target_q
 
-    # Loss non ridotta: serve sia per il peso di importance sampling (PER;
-    # is_weights è un vettore di soli 1 quando non prioritizzato, quindi
+    # Loss non ridotta: serve sia per il peso di importance sampling (is_weights
+    # è un vettore di soli 1 quando non prioritizzato, quindi
     # equivale alla media semplice di prima) sia per il TD-error da usare
     # nell'aggiornamento delle priorità.
     per_sample_loss = F.smooth_l1_loss(q_selected, targets, reduction="none")
@@ -1626,7 +1618,7 @@ def train_one_batch(
 
 
 # -----------------------------------------------------------------------------
-# Correctness check against the professor's API
+# Verifica di correttezza rispetto all'API ufficiale
 # -----------------------------------------------------------------------------
 
 
@@ -1656,7 +1648,7 @@ def validate_fast_environment(num_games: int = 64, seed: int = 1234) -> None:
             game.choose_action(int(actions[i]))
             if game.get_last_reward() != int(fast_rewards[i]):
                 raise AssertionError(
-                    f"Reward mismatch game={i}, step={step}: "
+                    f"Discrepanza della ricompensa nella partita={i}, step={step}: "
                     f"official={game.get_last_reward()}, fast={fast_rewards[i]}"
                 )
             if step < 24:
@@ -1665,18 +1657,18 @@ def validate_fast_environment(num_games: int = 64, seed: int = 1234) -> None:
                 raise AssertionError(f"Grid mismatch game={i}, step={step}")
 
         if bool(done[0]) != (step == 24):
-            raise AssertionError("Done mismatch")
+            raise AssertionError("Discrepanza del flag 'done'")
 
     for i, game in enumerate(official):
         if game.get_total_reward() != int(fast.total_scores[i]):
             raise AssertionError(
-                f"Final score mismatch game={i}: "
+                f"Discrepanza del punteggio finale nella partita={i}: "
                 f"official={game.get_total_reward()}, fast={fast.total_scores[i]}"
             )
 
 
 # -----------------------------------------------------------------------------
-# Evaluation
+# Valutazione
 # -----------------------------------------------------------------------------
 
 
@@ -1689,14 +1681,14 @@ def greedy_actions(
     dueling_mask_aware: bool = True,
     include_current_line_scores: bool = False,
 ) -> np.ndarray:
-    """Select greedy valid actions with one batched network forward pass.
+    """Seleziona le azioni valide greedy tramite un singolo forward pass della rete in batch.
 
     `score_table` non è un parametro qui: la valutazione misura sempre le
     prestazioni sotto la tabella VERA (DEFAULT_SCORE_TABLE, usata di default
     da encode_states quando score_table=None), indipendentemente da
     randomize_scores in training — altrimenti il punteggio riportato non
-    sarebbe più confrontabile con le run precedenti né con ciò che vedrà il
-    docente. `wide_norm` invece deve riflettere la scala su cui il modello è
+    sarebbe più confrontabile con le run precedenti.
+    `wide_norm` invece deve riflettere la scala su cui il modello è
     stato allenato (cfg.randomize_scores), non la tabella in uso. Nessuna
     augmentation da simmetria qui: la valutazione è greedy e deterministica
     sullo stato vero, non uno scopo di training.
@@ -1724,16 +1716,16 @@ def evaluate_vectorized(
     dueling_mask_aware: bool = True,
     include_current_line_scores: bool = False,
 ) -> tuple[float, float]:
-    """Evaluate greedily with the same verified vectorized environment as training.
+    """Valuta in modo greedy utilizzando lo stesso ambiente vettorializzato e verificato dell'addestramento.
 
     L'ambiente usa sempre DEFAULT_SCORE_TABLE (FastVectorKnister di default):
     il punteggio riportato è sempre sotto la tabella vera, così resta
     confrontabile con le run precedenti indipendentemente da randomize_scores.
     """
     if games_count <= 0:
-        raise ValueError("games_count must be positive")
+        raise ValueError("games_count deve essere positivo")
     if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
+        raise ValueError("batch_size deve essere positivo")
 
     was_training = model.training
     model.eval()
@@ -1785,14 +1777,14 @@ def evaluate_official(
     dueling_mask_aware: bool = True,
     include_current_line_scores: bool = False,
 ) -> tuple[float, float]:
-    """Evaluate with api.KnisterGame and print progress after each block of matches.
+    """Valuta con api.KnisterGame e stampa l'avanzamento dopo ogni blocco di partite.
 
-    Network inference is still batched inside each block, while calls to the official
-    Python environment remain sequential. This mode is slower but useful as a final
-    compatibility check.
+    L'inferenza della rete è comunque eseguita in batch all'interno di ciascun blocco,
+    mentre le chiamate all'ambiente Python ufficiale rimangono sequenziali. 
+    Questa modalità è più lenta ma utile come controllo di compatibilità finale.
     """
     if games_count <= 0:
-        raise ValueError("games_count must be positive")
+        raise ValueError("games_count deve essere positivo")
     if progress_every <= 0:
         progress_every = games_count
 
@@ -1866,7 +1858,7 @@ def run_evaluation(
     actual_seed = cfg.eval_seed if seed is None else int(seed)
     actual_games = cfg.eval_games if games_count is None else int(games_count)
     if actual_games <= 0:
-        raise ValueError("games_count must be positive")
+        raise ValueError("games_count deve essere positivo")
 
     mode_label = (
         "vettorizzata"
@@ -1925,12 +1917,12 @@ def run_evaluation(
 
 
 # -----------------------------------------------------------------------------
-# Progress reporting
+# Monitoraggio dell'avanzamento
 # -----------------------------------------------------------------------------
 
 
 def format_duration(seconds: float) -> str:
-    """Format a duration as DDg HH:MM:SS or HH:MM:SS."""
+    """Formatta una durata come DDg HH:MM:SS o HH:MM:SS."""
     if not math.isfinite(seconds) or seconds < 0:
         return "--:--:--"
 
@@ -1958,7 +1950,7 @@ def print_progress(
     gradient_updates: int,
     current_lr: Optional[float] = None,
 ) -> None:
-    """Print a complete, Colab-friendly progress report with ETA."""
+    """Stampa un report di avanzamento completo, compatibile con Colab e con ETA."""
     percentage = 100.0 * episodes_done / max(total_episodes, 1)
     interval_speed = interval_episodes / max(interval_seconds, 1e-9)
     overall_speed = episodes_done / max(elapsed_seconds, 1e-9)
@@ -2034,17 +2026,17 @@ def load_model_weights(path_value: str, device: torch.device) -> dict[str, torch
 
 def train(cfg: Config) -> None:
     if cfg.batch_size > cfg.replay_capacity:
-        raise ValueError("batch_size cannot exceed replay_capacity")
+        raise ValueError("batch_size non può eccedere replay_capacity")
     if cfg.eval_games <= 0:
-        raise ValueError("eval_games must be positive")
+        raise ValueError("eval_games deve essere positivo")
     if cfg.final_eval_games < 0:
         raise ValueError("final_eval_games non può essere negativo")
     if cfg.network_type not in {"mlp", "dueling"}:
         raise ValueError("network_type deve essere 'mlp' oppure 'dueling'")
     if cfg.eval_batch_size <= 0:
-        raise ValueError("eval_batch_size must be positive")
+        raise ValueError("eval_batch_size deve essere positivo")
     if cfg.eval_progress_every <= 0:
-        raise ValueError("eval_progress_every must be positive")
+        raise ValueError("eval_progress_every deve essere positivo")
     if Path(cfg.save_path).resolve() == Path(cfg.best_save_path).resolve():
         raise ValueError("save_path e best_save_path devono essere diversi")
     if cfg.n_step < 1 or cfg.n_step > 25:
@@ -2526,8 +2518,8 @@ def parse_args() -> Config:
         action="store_true",
         help=(
             "Campiona una tabella di punteggi diversa ad ogni round vettoriale "
-            "invece di usare sempre quella di api.KnisterGame (vedi audit, "
-            "requisito di conformità su modifica punteggi senza retraining). "
+            "invece di usare sempre quella di api.KnisterGame (""requisito di "
+            "conformità su modifica punteggi senza retraining). "
             "La valutazione usa comunque sempre la tabella vera."
         ),
     )
@@ -2540,7 +2532,7 @@ def parse_args() -> Config:
         help=(
             "Disattiva la media mascherata sulle sole azioni valide "
             "nell'aggregazione dueling, riproducendo il comportamento "
-            "precedente (utile solo per l'A/B diretto, vedi audit §C/§F#4)."
+            "precedente (utile solo per l'A/B diretto, #4)."
         ),
     )
     parser.add_argument(
@@ -2554,15 +2546,14 @@ def parse_args() -> Config:
         action="store_true",
         help=(
             "Aggiunge 75 feature con lo score corrente (non proiettato) di "
-            "riga/colonna/diagonale per ciascuna azione (suggerimento "
-            "'cos'è presente nelle righe/colonne/diagonali')."
+            "riga/colonna/diagonale per ciascuna azione."
         ),
     )
     parser.add_argument(
         "--prioritized-replay",
         action="store_true",
         help=(
-            "Prioritized Experience Replay (Vedi audit "
+            "Prioritized Experience Replay ("
             "§9.5): campiona più spesso le transizioni con TD-error assoluto "
             "maggiore, con correzione di importance sampling nella loss."
         ),
@@ -2576,7 +2567,7 @@ def parse_args() -> Config:
         action="store_true",
         help=(
             "Data augmentation nel replay con le 8 simmetrie D4 della "
-            "griglia (Vedi audit §9.3/§G): score "
+            "griglia: score "
             "invariante per costruzione, verificato in "
             "validate_symmetry_augmentation()."
         ),
