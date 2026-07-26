@@ -16,6 +16,7 @@ addestramenti indipendenti (seed 42: 61,29 — seed 7: 63,19).
 - [Avvio rapido](#avvio-rapido)
 - [`linenet.py` — validatori dell'architettura](#linenetpy--validatori-dellarchitettura)
 - [`linenet_train.py` — addestramento](#linenet_trainpy--addestramento)
+- [Riproduzione esatta dei modelli](#riproduzione-esatta-dei-modelli-consegnati)
 - [`eval_tools.py` — valutazione dei checkpoint](#eval_toolspy--valutazione-dei-checkpoint)
 - [`train_knister_v2.py` — il motore](#train_knister_v2py--il-motore)
 - [Iperparametri](#iperparametri)
@@ -137,6 +138,90 @@ Tutti gli iperparametri non specificati usano i valori predefiniti, che sono
 quelli della configurazione finale. Al termine vengono salvati due checkpoint,
 `_last` (ultimo episodio) e `_best` (miglior punteggio ottenuto), ciascuno con
 il proprio file `.json`.
+
+### Riproduzione esatta dei modelli consegnati
+
+I due checkpoint sono stati prodotti con i comandi seguenti, 
+riportati con tutti gli iperparametri espliciti. Sono gli
+stessi valori dei predefiniti: vengono indicati per intero in modo che il
+risultato sia riproducibile senza dipendere da eventuali modifiche ai default.
+
+I comandi sono stati eseguiti su Google Colab con GPU, da cui il prefisso `!` e
+i percorsi su Google Drive; per l'esecuzione in locale è sufficiente rimuovere
+il punto esclamativo e adattare i percorsi di salvataggio.
+
+**Modello con seme 7 — punteggio 63,19 (modello finale)**
+
+```bash
+python linenet_train.py \
+  --episodes 3000000 \
+  --n-step 3 \
+  --seed 7 \
+  --n-envs 1024 \
+  --hidden-size 384 \
+  --replay-capacity 2000000 \
+  --batch-size 1024 \
+  --learning-starts 100000 \
+  --updates-per-vector-step 2 \
+  --gamma 1.0 \
+  --lr 0.00025 \
+  --target-update-every 4000 \
+  --epsilon-start 1.0 \
+  --epsilon-end 0.03 \
+  --epsilon-decay-fraction 0.50 \
+  --eval-every-episodes 100000 \
+  --eval-games 500 \
+  --eval-seed 9876 \
+  --final-eval-games 10000 \
+  --final-eval-seed 24681357 \
+  --eval-mode vectorized \
+  --eval-batch-size 1024 \
+  --device cuda \
+  --save-path linenet_n3_3M_seed7_last.pth \
+  --best-save-path linenet_n3_3M_seed7_best.pth
+```
+
+Esito: miglior checkpoint 63,21 ± 10,16 all'episodio 2.900.992; valutazione
+hold-out su 10.000 partite 63,19 ± 10,16 (errore standard 0,102). Durata
+complessiva 1h 26m.
+
+**Modello con seme 42 — punteggio 61,29 (conferma di riproducibilità)**
+
+```bash
+python linenet_train.py \
+  --episodes 3000000 \
+  --n-step 3 \
+  --seed 42 \
+  --n-envs 1024 \
+  --hidden-size 384 \
+  --replay-capacity 2000000 \
+  --batch-size 1024 \
+  --learning-starts 100000 \
+  --updates-per-vector-step 2 \
+  --gamma 1.0 \
+  --lr 0.00025 \
+  --target-update-every 4000 \
+  --epsilon-start 1.0 \
+  --epsilon-end 0.03 \
+  --epsilon-decay-fraction 0.50 \
+  --eval-every-episodes 100000 \
+  --eval-games 500 \
+  --eval-seed 9876 \
+  --final-eval-games 5000 \
+  --final-eval-seed 24681357 \
+  --eval-mode vectorized \
+  --eval-batch-size 1024 \
+  --device cuda \
+  --save-path linenet_n3_3M_seed42_last.pth \
+  --best-save-path linenet_n3_3M_seed42_best.pth
+```
+
+Esito: miglior checkpoint 61,57 ± 10,92 all'episodio 3.000.000; valutazione
+hold-out su 5000 partite 61,29 ± 10,30 (errore standard 0,146). Durata
+complessiva 1h 24m.
+
+Le due configurazioni differiscono unicamente per il seme e per il numero di
+partite della valutazione finale.
 
 > **Flag da non usare con `linenet_train.py`:** `--network-type`,
 > `--state-encoding` e `--compile` sono gestiti internamente e il comando
